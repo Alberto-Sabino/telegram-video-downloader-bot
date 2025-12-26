@@ -3,7 +3,7 @@ name: CI / CD (tests + build + Render deploy)
 # Trigger: push to main branch
 on:
   push:
-    branches: [main]
+    branches: [ main ]
 
 # Prevent overlapping runs on the same ref
 concurrency:
@@ -16,6 +16,7 @@ permissions:
   id-token: write
 
 jobs:
+  # 1) Run tests in a clean runner; fail fast if tests fail
   test:
     name: Run unit tests
     runs-on: ubuntu-latest
@@ -26,7 +27,7 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -45,6 +46,7 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
+  # 2) Build & publish Docker image to GHCR (only runs if tests passed)
   build-and-publish:
     name: Build and publish Docker image to GHCR
     needs: test
@@ -70,16 +72,25 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
             ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
 
+  # 3) Deploy to Render (only strategy kept)
   deploy-to-render:
-    name: Deploy to Render (if configured)
+    name: Deploy to Render
     needs: build-and-publish
     runs-on: ubuntu-latest
-    if: ${{ secrets.RENDER_API_KEY != '' && secrets.RENDER_SERVICE_ID != '' }}
+    # Do not use `if` at job-level referencing `secrets` (not allowed during workflow parsing).
+    # Instead, map secrets into env and early-exit the job if missing.
     env:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
     steps:
+      - name: Check Render configuration
+        run: |
+          if [ -z "${RENDER_API_KEY:-}" ] || [ -z "${SERVICE_ID:-}" ]; then
+            echo "RENDER_API_KEY or SERVICE_ID not set; skipping Render deploy job."
+            exit 0
+          fi
+
       - name: Notify about Render deploy
         run: echo "Triggering Render deploy for service $SERVICE_ID using image $IMAGE"
 
