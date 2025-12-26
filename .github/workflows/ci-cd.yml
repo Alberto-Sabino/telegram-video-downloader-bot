@@ -66,14 +66,42 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner | lower }}/${{ github.event.repository.name }}:latest
-            ghcr.io/${{ github.repository_owner | lower }}/${{ github.event.repository.name }}:${{ github.sha }}
+          env:
+            RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+            SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          steps:
+            - name: Check Render configuration
+              run: |
+                if [ -z "${RENDER_API_KEY:-}" ] || [ -z "${SERVICE_ID:-}" ]; then
+                  echo "RENDER_API_KEY or SERVICE_ID not set; skipping Render deploy job."
+                  exit 0
+                fi
 
-  # 3) Deploy to Render (only strategy kept)
-  deploy-to-render:
+            - name: Prepare IMAGE variable
+              run: |
+                # compute lowercase owner/repo to match GHCR naming
+                full_repo="${GITHUB_REPOSITORY}"
+                owner=${full_repo%%/*}
+                repo=${full_repo##*/}
+                owner_lc=$(printf "%s" "$owner" | tr '[:upper:]' '[:lower:]')
+                repo_lc=$(printf "%s" "$repo" | tr '[:upper:]' '[:lower:]')
+                IMAGE=ghcr.io/${owner_lc}/${repo_lc}:latest
+                echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+            - name: Notify about Render deploy
+              run: echo "Triggering Render deploy for service $SERVICE_ID using image $IMAGE"
+
+            - name: Trigger Render deploy via Render API
+              run: |
+                set -euo pipefail
+                echo "Calling Render API to create a manual deploy..."
+                curl -sS -X POST "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
+                  -H "Authorization: Bearer $RENDER_API_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"type\": \"manual\", \"image\": \"$IMAGE\"}"
+
+            - name: Deploy complete
+              run: echo "Render deploy request complete (check Render dashboard for status)"
     name: Deploy to Render
     needs: build-and-publish
     runs-on: ubuntu-latest
@@ -82,7 +110,7 @@ jobs:
     env:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-      IMAGE: ghcr.io/${{ github.repository_owner | lower }}/${{ github.event.repository.name }}:latest
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
     steps:
       - name: Check Render configuration
         run: |
