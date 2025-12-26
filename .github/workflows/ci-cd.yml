@@ -63,45 +63,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image tags
+        run: |
+          # Compute lowercase owner/repo to satisfy registry naming requirements
+          full_repo="${GITHUB_REPOSITORY}"
+          owner=${full_repo%%/*}
+          repo=${full_repo##*/}
+          owner_lc=$(printf "%s" "$owner" | tr '[:upper:]' '[:lower:]')
+          repo_lc=$(printf "%s" "$repo" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_LATEST=ghcr.io/${owner_lc}/${repo_lc}:latest" >> $GITHUB_ENV
+          echo "IMAGE_SHA=ghcr.io/${owner_lc}/${repo_lc}:${GITHUB_SHA}" >> $GITHUB_ENV
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          env:
-            RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-            SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-          steps:
-            - name: Check Render configuration
-              run: |
-                if [ -z "${RENDER_API_KEY:-}" ] || [ -z "${SERVICE_ID:-}" ]; then
-                  echo "RENDER_API_KEY or SERVICE_ID not set; skipping Render deploy job."
-                  exit 0
-                fi
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_LATEST }}
+            ${{ env.IMAGE_SHA }}
 
-            - name: Prepare IMAGE variable
-              run: |
-                # compute lowercase owner/repo to match GHCR naming
-                full_repo="${GITHUB_REPOSITORY}"
-                owner=${full_repo%%/*}
-                repo=${full_repo##*/}
-                owner_lc=$(printf "%s" "$owner" | tr '[:upper:]' '[:lower:]')
-                repo_lc=$(printf "%s" "$repo" | tr '[:upper:]' '[:lower:]')
-                IMAGE=ghcr.io/${owner_lc}/${repo_lc}:latest
-                echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
-
-            - name: Notify about Render deploy
-              run: echo "Triggering Render deploy for service $SERVICE_ID using image $IMAGE"
-
-            - name: Trigger Render deploy via Render API
-              run: |
-                set -euo pipefail
-                echo "Calling Render API to create a manual deploy..."
-                curl -sS -X POST "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
-                  -H "Authorization: Bearer $RENDER_API_KEY" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"type\": \"manual\", \"image\": \"$IMAGE\"}"
-
-            - name: Deploy complete
-              run: echo "Render deploy request complete (check Render dashboard for status)"
+  # 3) Deploy to Render (only strategy kept)
+  deploy-to-render:
     name: Deploy to Render
     needs: build-and-publish
     runs-on: ubuntu-latest
@@ -110,7 +93,6 @@ jobs:
     env:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
     steps:
       - name: Check Render configuration
         run: |
@@ -119,6 +101,17 @@ jobs:
             exit 0
           fi
 
+      - name: Prepare IMAGE variable
+        run: |
+          # compute lowercase owner/repo to match GHCR naming
+          full_repo="${GITHUB_REPOSITORY}"
+          owner=${full_repo%%/*}
+          repo=${full_repo##*/}
+          owner_lc=$(printf "%s" "$owner" | tr '[:upper:]' '[:lower:]')
+          repo_lc=$(printf "%s" "$repo" | tr '[:upper:]' '[:lower:]')
+          IMAGE=ghcr.io/${owner_lc}/${repo_lc}:latest
+          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+
       - name: Notify about Render deploy
         run: echo "Triggering Render deploy for service $SERVICE_ID using image $IMAGE"
 
@@ -126,10 +119,16 @@ jobs:
         run: |
           set -euo pipefail
           echo "Calling Render API to create a manual deploy..."
-          curl -sS -X POST "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
+          # call Render API and capture HTTP status
+          http_code=$(curl -sS -w "%{http_code}" -o /tmp/render_resp -X POST "https://api.render.com/v1/services/$SERVICE_ID/deploys" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{\"type\": \"manual\", \"image\": \"$IMAGE\"}"
+            -d "{\"type\": \"manual\", \"image\": \"$IMAGE\"}")
+          echo "Render API returned status: $http_code"
+          if [ "${http_code:0:1}" != "2" ]; then
+            echo "Render deploy failed. Response:"; cat /tmp/render_resp
+            exit 1
+          fi
 
       - name: Deploy complete
         run: echo "Render deploy request complete (check Render dashboard for status)"
